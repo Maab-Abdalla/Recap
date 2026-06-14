@@ -7,15 +7,6 @@ export interface UserSettings {
   defaultEmails: string;
 }
 
-export interface SessionRow {
-  id: string;
-  summary: string;
-  action_items: ActionItem[];
-  task_count: number | null;
-  notion_url: string | null;
-  created_at: string;
-}
-
 const db = supabase as any;
 
 // ── Settings ──────────────────────────────────────────────────────────────────
@@ -78,35 +69,3 @@ export async function saveSession(
   return data?.id ?? null;
 }
 
-export async function getSessions(sessionKey: string): Promise<SessionRow[]> {
-  const { data, error } = await db
-    .from("sessions")
-    .select("id, summary, action_items, task_count, notion_url, created_at")
-    .eq("session_key", sessionKey)
-    .order("created_at", { ascending: false })
-    .limit(20);
-
-  if (error) {
-    console.error("Failed to fetch sessions:", error);
-    return [];
-  }
-  return data ?? [];
-}
-
-export async function getSession(id: string): Promise<{
-  transcript: string;
-  summary: string;
-  decisions: string[];
-  action_items: ActionItem[];
-  notion_url: string | null;
-  created_at: string;
-} | null> {
-  const { data, error } = await db
-    .from("sessions")
-    .select("transcript, summary, decisions, action_items, notion_url, created_at")
-    .eq("id", id)
-    .single();
-
-  if (error || !data) return null;
-  return data;
-}

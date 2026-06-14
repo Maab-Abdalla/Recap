@@ -37,3 +37,9 @@ export const SAMPLE_TRANSCRIPT = `[00:00] Alice (PM): Okay, are we recording? I 
 [02:32] Carol: On it.
 
 [02:34] Alice: Amazing. Okay, I've got to run — thanks all. Bye!`.trim();
+
+// Demo Notion destination — used to prefill the review screen so the whole
+// flow can be tried end-to-end without setup.
+export const DEMO_NOTION_DATABASE_ID = "37f5503af642805bb410d2120d68aa6a";
+export const DEMO_NOTION_BOARD_URL =
+  "https://www.notion.so/37f5503af642805bb410d2120d68aa6a";

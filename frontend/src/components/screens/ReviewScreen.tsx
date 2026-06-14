@@ -6,6 +6,10 @@ import { Button } from "@/components/ui/Button";
 import { PriorityBadge } from "@/components/ui/PriorityBadge";
 import { parseEmailList, generateId } from "@/lib/utils";
 import { useSettings } from "@/hooks/useSettings";
+import {
+  DEMO_NOTION_DATABASE_ID,
+  DEMO_NOTION_BOARD_URL,
+} from "@/lib/sampleTranscript";
 import type { ActionItem, MeetingExtraction, Priority } from "@/types";
 
 interface ReviewScreenProps {
@@ -32,7 +36,9 @@ export function ReviewScreen({
   const { settings } = useSettings();
   const [items, setItems] = useState<ActionItem[]>(extraction.actionItems);
   const [emails, setEmails] = useState(settings.defaultEmails || "");
-  const [notionDbId, setNotionDbId] = useState(settings.notionDatabaseId || "");
+  const [notionDbId, setNotionDbId] = useState(
+    settings.notionDatabaseId || DEMO_NOTION_DATABASE_ID
+  );
 
   function removeItem(id: string) {
     setItems((prev) => prev.filter((a) => a.id !== id));
@@ -194,6 +200,16 @@ export function ReviewScreen({
               value={notionDbId}
               onChange={(e) => setNotionDbId(e.target.value)}
             />
+            {notionDbId === DEMO_NOTION_DATABASE_ID && (
+              <a
+                href={DEMO_NOTION_BOARD_URL}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="mt-1.5 inline-block text-xs text-planetary hover:text-galaxy transition-colors"
+              >
+                Using the demo board — view it in Notion ↗
+              </a>
+            )}
           </div>
         </div>
 

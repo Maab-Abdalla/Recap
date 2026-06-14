@@ -29,14 +29,7 @@ export function NavBar({ screen }: { screen: Screen }) {
     <div className="mb-8">
       <div className="flex items-center justify-between">
         <Link href="/" aria-label="Recap home" className="inline-flex">
-          <Wordmark className="text-2xl" />
-        </Link>
-
-        <Link
-          href="/history"
-          className="text-xs font-medium text-universe hover:text-galaxy transition-colors"
-        >
-          Past meetings
+          <Wordmark className="text-4xl" />
         </Link>
       </div>
 
