@@ -1,0 +1,265 @@
+{
+  "name": "Recap",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "recap/process",
+        "responseMode": "responseNode",
+        "options": {
+          "allowedOrigins": "*"
+        }
+      },
+      "id": "webhook-process",
+      "name": "Webhook: Process",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Webhook POST payloads arrive nested under .body\nconst incoming = $input.first().json;\nconst transcript = incoming.body?.transcript ?? incoming.transcript;\n\nif (!transcript) throw new Error('No transcript provided');\n\nconst prompt = `You are a meeting analyst. Given the transcript below, extract:\n\n1. A 2-3 sentence meeting summary\n2. Key decisions made (as a list of strings)\n3. Action items, each with:\n   - task (string)\n   - owner (name or \"Unassigned\")\n   - deadline (date string or \"Not specified\")\n   - priority (\"High\", \"Medium\", or \"Low\")\n\nReturn ONLY valid JSON matching this exact shape, no explanation, no markdown:\n{\n  \"summary\": \"...\",\n  \"decisions\": [\"...\"],\n  \"actionItems\": [\n    { \"task\": \"...\", \"owner\": \"...\", \"deadline\": \"...\", \"priority\": \"High\" }\n  ]\n}\n\nTranscript:\n${transcript}`;\n\n// n8n Code nodes do not expose global fetch in all versions \u2014 use the built-in helper.\nlet data;\ntry {\n  data = await this.helpers.httpRequest({\n    method: 'POST',\n    url: 'https://api.anthropic.com/v1/messages',\n    headers: {\n      'x-api-key': $env.ANTHROPIC_API_KEY,\n      'anthropic-version': '2023-06-01',\n      'content-type': 'application/json'\n    },\n    body: {\n      model: $env.ANTHROPIC_MODEL || 'claude-sonnet-4-5-20250929',\n      max_tokens: 2000,\n      messages: [{ role: 'user', content: prompt }]\n    },\n    json: true\n  });\n} catch (e) {\n  const detail = e.response?.body ? JSON.stringify(e.response.body) : e.message;\n  throw new Error(`Anthropic API error: ${detail}`);\n}\n\nconst raw = data.content?.[0]?.text || '';\n\nlet parsed;\ntry {\n  parsed = JSON.parse(raw);\n} catch {\n  const match = raw.match(/\\{[\\s\\S]*\\}/);\n  if (!match) throw new Error('Claude returned non-JSON: ' + raw.slice(0, 300));\n  parsed = JSON.parse(match[0]);\n}\n\nreturn [{\n  json: {\n    extraction: parsed,\n    rawTranscript: transcript\n  }\n}];"
+      },
+      "id": "claude-extract",
+      "name": "Claude: Extract",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        460,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}"
+      },
+      "id": "respond-process",
+      "name": "Respond: Process",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        680,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "recap/confirm",
+        "responseMode": "responseNode",
+        "options": {
+          "allowedOrigins": "*"
+        }
+      },
+      "id": "webhook-confirm",
+      "name": "Webhook: Confirm",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        240,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Webhook POST payloads arrive nested under .body\nconst incoming = $input.first().json;\nconst body = incoming.body ?? incoming;\nconst items = body.actionItems || [];\nreturn items.map(item => ({\n  json: {\n    task: item.task,\n    owner: item.owner,\n    deadline: item.deadline,\n    priority: item.priority,\n    summary: body.summary,\n    decisions: body.decisions,\n    attendeeEmails: body.attendeeEmails,\n    notionDatabaseId: body.notionDatabaseId\n  }\n}));"
+      },
+      "id": "split-items",
+      "name": "Split Action Items",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        460,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nif (items.length === 0) return [];\n\nconst notionKey = $env.NOTION_API_KEY;\nconst dbId = items[0].json.notionDatabaseId;\n\nif (!notionKey) throw new Error('NOTION_API_KEY not set in environment');\nif (!dbId) throw new Error('notionDatabaseId not provided');\n\n// Notion API version 2025-09-03: databases are containers of data sources;\n// pages are created against a data source, not the database.\nconst headers = {\n  'Authorization': `Bearer ${notionKey}`,\n  'Notion-Version': '2025-09-03',\n  'Content-Type': 'application/json'\n};\n\n// 1) Retrieve the database to get its data source IDs (once for the whole batch).\nlet db;\ntry {\n  db = await this.helpers.httpRequest({\n    method: 'GET',\n    url: `https://api.notion.com/v1/databases/${dbId}`,\n    headers,\n    json: true\n  });\n} catch (e) {\n  const detail = e.response?.body ? JSON.stringify(e.response.body) : e.message;\n  throw new Error(`Notion: could not read database (check the ID and that the \"Recap\" integration is connected to it): ${detail}`);\n}\n\nconst dataSources = db.data_sources || [];\nif (dataSources.length === 0) throw new Error('Notion database has no data sources.');\nconst dataSourceId = dataSources[0].id;\n\n// 2) Read the data source schema once.\nlet ds;\ntry {\n  ds = await this.helpers.httpRequest({\n    method: 'GET',\n    url: `https://api.notion.com/v1/data_sources/${dataSourceId}`,\n    headers,\n    json: true\n  });\n} catch (e) {\n  const detail = e.response?.body ? JSON.stringify(e.response.body) : e.message;\n  throw new Error(`Notion: could not read data source schema: ${detail}`);\n}\n\nconst props = ds.properties || {};\nconst titlePropName = Object.keys(props).find(k => props[k].type === 'title');\nif (!titlePropName) throw new Error('Notion data source has no Title property.');\n\nfunction buildValue(name, value) {\n  const prop = props[name];\n  if (!prop) return null;\n  switch (prop.type) {\n    case 'title':      return { title: [{ text: { content: value } }] };\n    case 'rich_text':  return { rich_text: [{ text: { content: value } }] };\n    case 'select':     return { select: { name: value } };\n    case 'status':     return { status: { name: value } };\n    case 'date':       return { date: { start: value } };\n    case 'number': {\n      const num = Number(value);\n      return Number.isFinite(num) ? { number: num } : null;\n    }\n    default:           return { rich_text: [{ text: { content: value } }] };\n  }\n}\n\n// 3) Create one page per action item.\nconst out = [];\nfor (const it of items) {\n  const item = it.json;\n  const properties = {};\n  properties[titlePropName] = buildValue(titlePropName, item.task || 'Untitled Task');\n\n  const maybe = (name, value) => {\n    if (props[name] && value != null && value !== '') {\n      const v = buildValue(name, value);\n      if (v) properties[name] = v;\n    }\n  };\n\n  maybe('Owner', item.owner || 'Unassigned');\n  if (props['Deadline']) {\n    if (props['Deadline'].type === 'date') {\n      const d = new Date(item.deadline);\n      if (!isNaN(d.getTime())) properties['Deadline'] = { date: { start: d.toISOString().slice(0,10) } };\n    } else {\n      maybe('Deadline', item.deadline || 'Not specified');\n    }\n  }\n  maybe('Priority', item.priority || 'Medium');\n  maybe('Status', 'Not started');\n\n  let data;\n  try {\n    data = await this.helpers.httpRequest({\n      method: 'POST',\n      url: 'https://api.notion.com/v1/pages',\n      headers,\n      body: { parent: { type: 'data_source_id', data_source_id: dataSourceId }, properties },\n      json: true\n    });\n  } catch (e) {\n    const detail = e.response?.body ? JSON.stringify(e.response.body) : e.message;\n    throw new Error(`Notion API error creating task \"${item.task}\": ${detail}`);\n  }\n\n  out.push({ json: {\n    notionPageId: data.id,\n    notionUrl: data.url,\n    task: item.task,\n    attendeeEmails: item.attendeeEmails,\n    summary: item.summary,\n    decisions: item.decisions,\n    notionDatabaseId: item.notionDatabaseId\n  }});\n}\n\nreturn out;"
+      },
+      "id": "notion-create",
+      "name": "Notion: Create Task",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        680,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "aggregate": "aggregateAllItemData",
+        "options": {}
+      },
+      "id": "aggregate-tasks",
+      "name": "Aggregate Tasks",
+      "type": "n8n-nodes-base.aggregate",
+      "typeVersion": 1,
+      "position": [
+        900,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.first().json.data || [];\nconst first = items[0] || {};\nconst confirmRaw = $('Webhook: Confirm').first().json;\nconst body = confirmRaw.body ?? confirmRaw;\n\nconst taskRows = (body.actionItems || []).map(t =>\n  `<tr>\n    <td style='padding:8px;border-bottom:1px solid #f3f4f6;font-size:13px'>${t.task}</td>\n    <td style='padding:8px;border-bottom:1px solid #f3f4f6;font-size:13px;color:#6b7280'>${t.owner}</td>\n    <td style='padding:8px;border-bottom:1px solid #f3f4f6;font-size:13px;color:#6b7280'>${t.deadline}</td>\n    <td style='padding:8px;border-bottom:1px solid #f3f4f6;font-size:13px'><span style='background:${t.priority==='High'?'#fef2f2':t.priority==='Medium'?'#fffbeb':'#f0fdf4'};color:${t.priority==='High'?'#991b1b':t.priority==='Medium'?'#92400e':'#166534'};padding:2px 8px;border-radius:9999px;font-size:11px'>${t.priority}</span></td>\n  </tr>`\n).join('');\n\nconst decisionsHtml = (body.decisions || []).map(d =>\n  `<li style='color:#374151;font-size:14px;margin-bottom:4px'>${d}</li>`\n).join('');\n\nconst html = `\n<div style='font-family:system-ui,sans-serif;max-width:600px;margin:0 auto;padding:24px'>\n  <h2 style='color:#111827;font-size:20px;font-weight:500;margin:0 0 8px'>Meeting Summary</h2>\n  <p style='color:#6b7280;font-size:14px;line-height:1.6;margin:0 0 24px'>${body.summary}</p>\n\n  <h3 style='font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:#9ca3af;margin:0 0 8px'>Decisions</h3>\n  <ul style='margin:0 0 24px;padding-left:20px'>${decisionsHtml}</ul>\n\n  <h3 style='font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:#9ca3af;margin:0 0 8px'>Action Items</h3>\n  <table style='width:100%;border-collapse:collapse'>\n    <thead>\n      <tr style='background:#f9fafb'>\n        <th style='text-align:left;padding:8px;font-size:12px;color:#6b7280;font-weight:500'>Task</th>\n        <th style='text-align:left;padding:8px;font-size:12px;color:#6b7280;font-weight:500'>Owner</th>\n        <th style='text-align:left;padding:8px;font-size:12px;color:#6b7280;font-weight:500'>Deadline</th>\n        <th style='text-align:left;padding:8px;font-size:12px;color:#6b7280;font-weight:500'>Priority</th>\n      </tr>\n    </thead>\n    <tbody>${taskRows}</tbody>\n  </table>\n\n  <p style='margin:24px 0 0;font-size:12px;color:#9ca3af'>Powered by Recap</p>\n</div>`;\n\nconst notionUrl = `https://notion.so/${(first.notionDatabaseId || '').replace(/-/g, '')}`;\n\nreturn [{ json: { html, emailList: body.attendeeEmails || [], taskCount: (body.actionItems || []).length, notionUrl } }];"
+      },
+      "id": "build-email",
+      "name": "Build Email",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\nconst sgKey = $env.SENDGRID_API_KEY;\nconst fromEmail = $env.SENDGRID_FROM_EMAIL;\n\nif (!sgKey) throw new Error('SENDGRID_API_KEY not set in environment');\nif (!fromEmail) throw new Error('SENDGRID_FROM_EMAIL not set in environment');\n\nconst toList = (item.emailList || []).map(email => ({ email: email.trim() })).filter(e => e.email.includes('@'));\n\nif (toList.length === 0) {\n  return [{ json: { skipped: true, reason: 'No valid recipient emails', notionUrl: item.notionUrl, taskCount: item.taskCount } }];\n}\n\ntry {\n  await this.helpers.httpRequest({\n    method: 'POST',\n    url: 'https://api.sendgrid.com/v3/mail/send',\n    headers: {\n      'Authorization': `Bearer ${sgKey}`,\n      'Content-Type': 'application/json'\n    },\n    body: {\n      personalizations: [{ to: toList }],\n      from: { email: fromEmail, name: 'Recap' },\n      subject: 'Meeting summary & action items',\n      content: [{ type: 'text/html', value: item.html }]\n    },\n    json: true\n  });\n} catch (e) {\n  const detail = e.response?.body ? JSON.stringify(e.response.body) : e.message;\n  throw new Error(`SendGrid error: ${detail}`);\n}\n\nreturn [{ json: { emailSent: true, recipients: toList.length, notionUrl: item.notionUrl, taskCount: item.taskCount } }];"
+      },
+      "id": "sendgrid-send",
+      "name": "SendGrid: Send Email",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1340,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\nreturn [{ json: {\n  notionUrl: item.notionUrl || '',\n  taskCount: item.taskCount || 0,\n  emailsSent: item.recipients || 0\n} }];"
+      },
+      "id": "build-response",
+      "name": "Build Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1560,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}"
+      },
+      "id": "respond-confirm",
+      "name": "Respond: Confirm",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        1780,
+        560
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook: Process": {
+      "main": [
+        [
+          {
+            "node": "Claude: Extract",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claude: Extract": {
+      "main": [
+        [
+          {
+            "node": "Respond: Process",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook: Confirm": {
+      "main": [
+        [
+          {
+            "node": "Split Action Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Action Items": {
+      "main": [
+        [
+          {
+            "node": "Notion: Create Task",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notion: Create Task": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Tasks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregate Tasks": {
+      "main": [
+        [
+          {
+            "node": "Build Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Email": {
+      "main": [
+        [
+          {
+            "node": "SendGrid: Send Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SendGrid: Send Email": {
+      "main": [
+        [
+          {
+            "node": "Build Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Response": {
+      "main": [
+        [
+          {
+            "node": "Respond: Confirm",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

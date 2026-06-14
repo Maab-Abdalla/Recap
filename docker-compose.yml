@@ -1,0 +1,113 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: recap-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-n8n}
+      POSTGRES_USER: ${POSTGRES_USER:-n8n}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-n8n}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - recap-net
+
+  n8n:
+    # Pinned (not :latest) — recent n8n releases have a regression where
+    # production webhooks register but then 404 "not registered" on
+    # single-container Docker setups. 1.76.1 is a stable release without it.
+    image: n8nio/n8n:1.76.1
+    container_name: recap-n8n
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    environment:
+      N8N_HOST: ${N8N_HOST:-localhost}
+      N8N_PORT: 5678
+      N8N_PROTOCOL: ${N8N_PROTOCOL:-http}
+      WEBHOOK_URL: ${WEBHOOK_URL:-http://localhost:5678/}
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: 5432
+      DB_POSTGRESDB_DATABASE: ${POSTGRES_DB:-n8n}
+      DB_POSTGRESDB_USER: ${POSTGRES_USER:-n8n}
+      DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD}
+      N8N_LOG_LEVEL: info
+      GENERIC_TIMEZONE: ${TIMEZONE:-Asia/Kuala_Lumpur}
+      # Ensure production webhooks register in the main process (single container)
+      N8N_DISABLE_PRODUCTION_MAIN_PROCESS: "false"
+      # CORS — kept for completeness; the frontend now proxies server-side
+      N8N_CORS_ENABLE: "true"
+      N8N_CORS_ALLOWED_ORIGINS: "*"
+      N8N_SECURE_COOKIE: "false"
+      # Whitelist env vars accessible to Code nodes via $env
+      NODE_FUNCTION_ALLOW_ENV: "ANTHROPIC_API_KEY,ANTHROPIC_MODEL,NOTION_API_KEY,SENDGRID_API_KEY,SENDGRID_FROM_EMAIL"
+      # API keys for Code nodes
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-4-5-20250929}
+      NOTION_API_KEY: ${NOTION_API_KEY}
+      SENDGRID_API_KEY: ${SENDGRID_API_KEY}
+      SENDGRID_FROM_EMAIL: ${SENDGRID_FROM_EMAIL}
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./n8n-workflows:/workflow:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - recap-net
+
+  n8n-init:
+    image: curlimages/curl:latest
+    container_name: recap-n8n-init
+    profiles: ["init"]
+    restart: "no"
+    environment:
+      N8N_API_KEY: ${N8N_API_KEY}
+    volumes:
+      - ./scripts/n8n-init.sh:/init.sh:ro
+      - ./n8n-workflows:/workflow:ro
+    entrypoint: ["sh", "/init.sh"]
+    depends_on:
+      - n8n
+    networks:
+      - recap-net
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL}
+        NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY}
+        NEXT_PUBLIC_N8N_WEBHOOK_URL: ${NEXT_PUBLIC_N8N_WEBHOOK_URL:-http://localhost:5678/webhook/recap}
+    container_name: recap-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL}
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY}
+      NEXT_PUBLIC_N8N_WEBHOOK_URL: ${NEXT_PUBLIC_N8N_WEBHOOK_URL:-http://localhost:5678/webhook/recap}
+      # Server-side only: the proxy routes reach n8n over the internal Docker
+      # network, so use the service name, not localhost.
+      N8N_WEBHOOK_URL: ${N8N_WEBHOOK_URL:-http://n8n:5678/webhook/recap}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+    depends_on:
+      - n8n
+    networks:
+      - recap-net
+
+volumes:
+  postgres_data:
+  n8n_data:
+
+networks:
+  recap-net:
+    driver: bridge

@@ -1,0 +1,7 @@
+[build]
+builder = "image"
+image = "n8nio/n8n:latest"
+
+[deploy]
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 3
